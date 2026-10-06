@@ -1,19 +1,27 @@
-import type { Era, LogEntry, Region, Unit } from '../types/game'
+import type {
+  EconomyBreakdown,
+  Era,
+  LogEntry,
+  Modifiers,
+  Region,
+  Unit,
+  UnitKind,
+} from '../types/game'
 import type { Market, Stockpile } from './systems/economy'
-import type { Modifiers } from '../types/game'
 import { UNITS } from '../data/units'
+import { generateWorld } from './systems/world'
 
 /** Slot name used by the autosave and the legacy single save. */
 export const AUTO_SLOT = 'auto'
 const INDEX_KEY = 'aethelgard-saves-index'
 const LEGACY_KEY = 'aethelgard-save-v1'
 const slotKey = (name: string) => `aethelgard-save-${name}`
-const SAVE_VERSION = 3
+export const SAVE_VERSION = 4
 /** Autosave every N ticks. */
 export const AUTOSAVE_INTERVAL = 10
 
-export interface SaveData {
-  version: number
+/** Full in-memory game state, as committed to / restored from the stores. */
+export interface GameSnapshot {
   game: {
     tick: number
     era: Era
@@ -27,8 +35,10 @@ export interface SaveData {
   player: {
     stockpile: Stockpile
     gold: number
+    goldRate: number
     scienceRate: number
     goodsRate: Stockpile
+    breakdown: EconomyBreakdown
   }
   research: {
     activeId: string | null
@@ -39,6 +49,19 @@ export interface SaveData {
   }
 }
 
+/** Region geometry is deterministic from the seed, so it isn't stored. */
+type Geometry = 'polygon' | 'centroid' | 'neighborIds'
+type StoredRegion = Omit<Region, Geometry> & Partial<Pick<Region, Geometry>>
+
+interface SaveData {
+  version: number
+  game: Omit<GameSnapshot['game'], 'regions'> & {
+    regions: Record<string, StoredRegion>
+  }
+  player: GameSnapshot['player']
+  research: GameSnapshot['research']
+}
+
 export interface SaveMeta {
   name: string
   savedAt: number
@@ -46,23 +69,23 @@ export interface SaveMeta {
   era: Era
 }
 
+function makeUnit(id: string, kind: UnitKind, regionId: string, strength?: number): Unit {
+  const def = UNITS[kind]
+  return {
+    id,
+    kind,
+    regionId,
+    strength: strength ?? def.strength,
+    movesLeft: def.moves,
+    sight: def.sight,
+    path: [],
+  }
+}
+
 /** A lone warrior at the capital — the starting scout. */
 export function startingUnits(regions: Record<string, Region>): Unit[] {
   const capital = Object.values(regions).find((r) => r.isCapital)
-  if (!capital) return []
-  const def = UNITS.warrior
-  return [
-    {
-      id: 'u0',
-      kind: 'warrior',
-      regionId: capital.id,
-      strength: def.strength,
-      moves: def.moves,
-      movesLeft: def.moves,
-      sight: def.sight,
-      path: [],
-    },
-  ]
+  return capital ? [makeUnit('u0', 'warrior', capital.id)] : []
 }
 
 function readIndex(): SaveMeta[] {
@@ -87,50 +110,103 @@ export function listSaves(): SaveMeta[] {
   return readIndex().sort((a, b) => b.savedAt - a.savedAt)
 }
 
-/** Fill in fields added in later save versions so old saves keep working. */
+function stripGeometry(regions: Record<string, Region>): Record<string, StoredRegion> {
+  const out: Record<string, StoredRegion> = {}
+  for (const [id, r] of Object.entries(regions)) {
+    const { polygon: _p, centroid: _c, neighborIds: _n, ...rest } = r
+    void _p
+    void _c
+    void _n
+    out[id] = rest
+  }
+  return out
+}
+
+/** Rebuild region geometry from the seed; stored geometry (older saves) wins. */
+export function hydrateRegions(
+  seed: number,
+  stored: Record<string, StoredRegion>,
+): Record<string, Region> {
+  const world = generateWorld(seed)
+  const out: Record<string, Region> = {}
+  for (const [id, r] of Object.entries(stored)) {
+    const geo = world[id]
+    out[id] = {
+      ...r,
+      polygon: r.polygon ?? geo?.polygon ?? [],
+      centroid: r.centroid ?? geo?.centroid ?? { x: 0, y: 0 },
+      neighborIds: r.neighborIds ?? geo?.neighborIds ?? [],
+    }
+  }
+  return out
+}
+
+/** Loosely-typed shapes of fields that existed in older save versions. */
+type LegacyRegion = StoredRegion & { army?: number }
+type LegacyUnit = Partial<Unit> & { moves?: number }
+
+/** Fill in / convert fields from older save versions so old saves keep
+ * working: unit paths, construction, research queue, move bonus, and
+ * region-bound armies (v≤3) become Soldier units. */
 function migrate(data: SaveData): SaveData {
-  for (const u of data.game.units ?? []) {
-    u.path ??= []
-  }
-  for (const r of Object.values(data.game.regions)) {
+  const units = (data.game.units ?? []) as LegacyUnit[]
+  const migratedUnits: Unit[] = units.map((u) => {
+    const { moves: _m, ...rest } = u
+    void _m
+    return { ...makeUnit(rest.id ?? 'u0', rest.kind ?? 'warrior', rest.regionId ?? ''), ...rest, path: rest.path ?? [] }
+  })
+  let nextId =
+    Math.max(-1, ...migratedUnits.map((u) => Number(u.id.slice(1)) || 0)) + 1
+  for (const r of Object.values(data.game.regions) as LegacyRegion[]) {
     r.construction ??= null
+    if (r.army && r.army > 0) {
+      migratedUnits.push(makeUnit(`u${nextId++}`, 'soldier', r.id, r.army))
+    }
+    delete r.army
   }
+  data.game.units = migratedUnits
   data.research.queue ??= []
+  data.research.modifiers.unitMoveBonus ??= 0
+  data.player.goldRate ??= 0
+  data.player.breakdown ??= { gold: {}, food: {}, science: {} }
   data.version = SAVE_VERSION
   return data
 }
 
-export function saveGame(
-  data: Omit<SaveData, 'version'>,
-  slot: string = AUTO_SLOT,
-): void {
+export function saveGame(snapshot: GameSnapshot, slot: string = AUTO_SLOT): void {
   try {
-    const payload: SaveData = { ...data, version: SAVE_VERSION }
+    const payload: SaveData = {
+      ...snapshot,
+      game: { ...snapshot.game, regions: stripGeometry(snapshot.game.regions) },
+      version: SAVE_VERSION,
+    }
     localStorage.setItem(slotKey(slot), JSON.stringify(payload))
     const meta: SaveMeta = {
       name: slot,
       savedAt: Date.now(),
-      tick: data.game.tick,
-      era: data.game.era,
+      tick: snapshot.game.tick,
+      era: snapshot.game.era,
     }
-    writeIndex([
-      meta,
-      ...readIndex().filter((m) => m.name !== slot),
-    ])
+    writeIndex([meta, ...readIndex().filter((m) => m.name !== slot)])
   } catch {
     // Storage unavailable or full — saving is best-effort.
   }
 }
 
-export function loadGame(slot: string = AUTO_SLOT): SaveData | null {
+export function loadGame(slot: string = AUTO_SLOT): GameSnapshot | null {
   try {
     let raw = localStorage.getItem(slotKey(slot))
-    if (!raw && slot === AUTO_SLOT) {
-      raw = localStorage.getItem(LEGACY_KEY)
-    }
+    if (!raw && slot === AUTO_SLOT) raw = localStorage.getItem(LEGACY_KEY)
     if (!raw) return null
     const data = migrate(JSON.parse(raw) as SaveData)
-    return data.version === SAVE_VERSION ? data : null
+    return {
+      game: {
+        ...data.game,
+        regions: hydrateRegions(data.game.seed, data.game.regions),
+      },
+      player: data.player,
+      research: data.research,
+    }
   } catch {
     return null
   }

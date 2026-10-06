@@ -29,6 +29,8 @@ function describeEffect(e: TechEffect): string {
       return `Science ×${e.multiplier}`
     case 'buildingSlots':
       return `+${e.amount} building slot`
+    case 'unitMoveBonus':
+      return `+${e.amount} unit move`
   }
 }
 

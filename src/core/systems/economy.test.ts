@@ -5,9 +5,10 @@ import {
   initialMarket,
   regionCapacity,
   regionOutput,
+  unitUpkeep,
 } from './economy'
 import { baseModifiers } from './research'
-import type { Region } from '../../types/game'
+import type { Region, Unit } from '../../types/game'
 
 function makeRegion(overrides: Partial<Region> = {}): Region {
   return {
@@ -26,7 +27,6 @@ function makeRegion(overrides: Partial<Region> = {}): Region {
     construction: null,
     deposit: null,
     garrison: 0,
-    army: 0,
     ...overrides,
   }
 }
@@ -156,6 +156,41 @@ describe('computeEconomyTick', () => {
       mods,
     )
     expect(res.population.r0).toBe(20)
+  })
+
+  it('deducts unit upkeep from gold and food', () => {
+    const regions = { r0: makeRegion({ population: 10 }) }
+    const units: Unit[] = [
+      { id: 'u0', kind: 'soldier', regionId: 'r0', strength: 10, movesLeft: 1, sight: 1, path: [] },
+      { id: 'u1', kind: 'warrior', regionId: 'r0', strength: 6, movesLeft: 1, sight: 1, path: [] },
+    ]
+    const base = computeEconomyTick(regions, initialMarket(), emptyStockpile(), emptyStockpile(), mods)
+    const res = computeEconomyTick(regions, initialMarket(), emptyStockpile(), emptyStockpile(), mods, 0, units)
+    const upkeep = unitUpkeep(units)
+    expect(upkeep).toEqual({ gold: 1.5, food: 0.5 })
+    expect(res.goldDelta).toBeCloseTo(base.goldDelta - 1.5)
+    expect(res.goodsDelta.food).toBeCloseTo(base.goodsDelta.food - 0.5)
+    expect(res.breakdown.gold['Unit upkeep']).toBeCloseTo(-1.5)
+  })
+
+  it('breakdown parts sum to the rates', () => {
+    const regions = {
+      r0: makeRegion({
+        population: 12,
+        deposit: 'fertile_soil',
+        buildings: [
+          { id: 'farm', level: 2 },
+          { id: 'market', level: 1 },
+        ],
+      }),
+    }
+    const res = computeEconomyTick(regions, initialMarket(), emptyStockpile(), emptyStockpile(), mods)
+    const sum = (b: Record<string, number>) => Object.values(b).reduce((a, v) => a + v, 0)
+    expect(sum(res.breakdown.gold)).toBeCloseTo(res.goldDelta)
+    expect(sum(res.breakdown.food)).toBeCloseTo(res.goodsDelta.food)
+    expect(sum(res.breakdown.science)).toBeCloseTo(res.scienceGain)
+    expect(res.breakdown.gold.Taxes).toBeCloseTo(3)
+    expect(res.breakdown.food.Deposits).toBeCloseTo(2)
   })
 
   it('granary raises the housing cap', () => {

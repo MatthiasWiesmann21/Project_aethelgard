@@ -3,6 +3,7 @@ import { FolderOpen, Save, Trash2 } from 'lucide-react'
 import { useGameStore } from '../../store/useGameStore'
 import { listSaves } from '../../core/persistence'
 import { ERA_LABEL } from '../../data/techs'
+import { formatDate } from '../../core/time'
 import Window from './Window'
 
 /** Named save slots + autosave — write/delete managed via the game store. */
@@ -66,7 +67,7 @@ export default function SavesWindow() {
                 {s.name === 'auto' ? 'Autosave' : s.name}
               </div>
               <div className="text-[11px] text-slate-400">
-                Month {s.tick + 1} · {ERA_LABEL[s.era]} ·{' '}
+                {formatDate(s.tick)} · {ERA_LABEL[s.era]} ·{' '}
                 {new Date(s.savedAt).toLocaleString()}
               </div>
             </div>

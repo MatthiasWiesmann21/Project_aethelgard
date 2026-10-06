@@ -1,8 +1,10 @@
 import type {
+  EconomyBreakdown,
   GoodId,
   MarketGood,
   Modifiers,
   Region,
+  Unit,
 } from '../../types/game'
 import type { BuildingCost, BuildingDef } from '../../types/buildings'
 import {
@@ -12,29 +14,48 @@ import {
 } from '../../data/buildings'
 import { DEPOSITS } from '../../data/deposits'
 import { GOODS, GOOD_IDS } from '../../data/goods'
+import {
+  BASE_POP_GROWTH,
+  CLAIM_BASE_COST,
+  FOOD_PER_POP,
+  MARKET_ELASTICITY,
+  PRICE_MAX,
+  PRICE_MIN,
+  SCIENCE_PER_POP,
+  SUBSISTENCE_FOOD_PER_POP,
+  SUPPLY_EMA,
+  TAX_PER_POP,
+  TRADE_PRESSURE_DECAY,
+} from '../../data/economy'
+import {
+  RIVER_FOOD,
+  RIVER_GOLD,
+  RIVER_POP_GROWTH,
+} from '../../data/rivers'
 import { TERRAIN } from '../../data/terrain'
+import { UNITS } from '../../data/units'
+import { riverCount } from './world'
 
-export const FOOD_PER_POP = 0.2
-/** Everyone farms a little — population always produces some food. */
-export const SUBSISTENCE_FOOD_PER_POP = 0.15
-/** Baseline tax income per population. */
-export const TAX_PER_POP = 0.25
-/** ~6%/year at monthly ticks. */
-export const BASE_POP_GROWTH = 0.005
-export const SCIENCE_PER_POP = 0.12
-export const MARKET_ELASTICITY = 0.6
-export const PRICE_MIN = 0.2
-export const PRICE_MAX = 6
-export const SUPPLY_EMA = 0.3
-export const TRADE_PRESSURE_DECAY = 0.8
-export const TRADE_QTY = 10
-export const CLAIM_BASE_COST = 40
+export {
+  FOOD_PER_POP,
+  SUBSISTENCE_FOOD_PER_POP,
+  TAX_PER_POP,
+  BASE_POP_GROWTH,
+  SCIENCE_PER_POP,
+  TRADE_QTY,
+  CLAIM_BASE_COST,
+} from '../../data/economy'
 
 export type Stockpile = Record<GoodId, number>
 export type Market = Record<GoodId, MarketGood>
+type Goods = Partial<Record<GoodId, number>>
 
 export function emptyStockpile(): Stockpile {
   return { food: 0, wood: 0, stone: 0, iron: 0 }
+}
+
+export function emptyBreakdown(): EconomyBreakdown {
+  return { gold: {}, food: {}, science: {} }
 }
 
 export function initialMarket(): Market {
@@ -65,73 +86,124 @@ export function regionWorkersNeeded(region: Region): number {
   return region.buildings.reduce((sum, b) => sum + BUILDINGS[b.id].workers, 0)
 }
 
-/** Housing cap by terrain — how many people a region can hold. */
-export const TERRAIN_CAPACITY: Record<string, number> = {
-  plains: 20,
-  forest: 16,
-  hills: 14,
-  mountain: 10,
-  coast: 18,
-  water: 0,
-}
-
 /** Population ceiling: terrain capacity + building housing bonuses. */
 export function regionCapacity(region: Region): number {
   return (
-    (TERRAIN_CAPACITY[region.terrain] ?? 0) +
+    TERRAIN[region.terrain].capacity +
     region.buildings.reduce((sum, b) => sum + BUILDINGS[b.id].capacityBonus, 0)
   )
 }
 
+export interface SourceYield {
+  goods: Goods
+  gold: number
+}
+
+/** A region's output split by where it comes from (multipliers applied). */
+export interface RegionSources {
+  terrain: SourceYield
+  deposit: SourceYield
+  rivers: SourceYield
+  buildings: SourceYield
+}
+
+function scaled(y: SourceYield, modifiers: Modifiers): SourceYield {
+  const goods: Goods = {}
+  for (const g of GOOD_IDS) {
+    const v = y.goods[g]
+    if (v) goods[g] = v * modifiers.yieldMultiplier[g]
+  }
+  return { goods, gold: y.gold * modifiers.goldYieldMultiplier }
+}
+
 /**
- * Total per-tick output of one region: terrain bonus + deposit + building
- * yields (scaled by level and by workforce staffing). Terrain and deposit
- * yields are natural and never need workers.
+ * Per-source output of one region: terrain bonus, deposit, bordering rivers,
+ * and buildings (scaled by level and workforce staffing). Terrain, deposit
+ * and river yields are natural and never need workers.
  */
-export function regionOutput(
+export function regionSources(
   region: Region,
   modifiers: Modifiers,
-): { goods: Partial<Record<GoodId, number>>; gold: number } {
-  const goods: Partial<Record<GoodId, number>> = {
-    ...TERRAIN[region.terrain].yieldBonus,
-  }
-  let gold = 0
-
-  if (region.deposit) {
-    const dep = DEPOSITS[region.deposit]
-    for (const g of GOOD_IDS) {
-      const v = dep.yieldBonus[g]
-      if (v) goods[g] = (goods[g] ?? 0) + v
-    }
-    gold += dep.goldYield
+  regions?: Record<string, Region>,
+  seed = 0,
+): RegionSources {
+  const terrain: SourceYield = {
+    goods: { ...TERRAIN[region.terrain].yieldBonus },
+    gold: 0,
   }
 
+  const deposit: SourceYield = region.deposit
+    ? {
+        goods: { ...DEPOSITS[region.deposit].yieldBonus },
+        gold: DEPOSITS[region.deposit].goldYield,
+      }
+    : { goods: {}, gold: 0 }
+
+  const n = regions ? riverCount(seed, region, regions) : 0
+  const rivers: SourceYield = {
+    goods: n ? { food: n * RIVER_FOOD } : {},
+    gold: n * RIVER_GOLD,
+  }
+
+  const buildings: SourceYield = { goods: {}, gold: 0 }
   const needed = regionWorkersNeeded(region)
   const staffing = needed > 0 ? Math.min(1, region.population / needed) : 1
   for (const b of region.buildings) {
     const def = BUILDINGS[b.id]
     for (const g of GOOD_IDS) {
       const v = def.yields[g]
-      if (v) goods[g] = (goods[g] ?? 0) + v * b.level * staffing
+      if (v) buildings.goods[g] = (buildings.goods[g] ?? 0) + v * b.level * staffing
     }
-    gold += def.goldYield * b.level * staffing
+    buildings.gold += def.goldYield * b.level * staffing
   }
 
-  for (const g of GOOD_IDS) {
-    if (goods[g]) goods[g] = goods[g]! * modifiers.yieldMultiplier[g]
+  return {
+    terrain: scaled(terrain, modifiers),
+    deposit: scaled(deposit, modifiers),
+    rivers: scaled(rivers, modifiers),
+    buildings: scaled(buildings, modifiers),
   }
-  return { goods, gold: gold * modifiers.goldYieldMultiplier }
+}
+
+/** Total per-tick output of one region (sum of all sources). */
+export function regionOutput(
+  region: Region,
+  modifiers: Modifiers,
+  regions?: Record<string, Region>,
+  seed = 0,
+): SourceYield {
+  const goods: Goods = {}
+  let gold = 0
+  for (const s of Object.values(regionSources(region, modifiers, regions, seed))) {
+    for (const g of GOOD_IDS) {
+      const v = s.goods[g]
+      if (v) goods[g] = (goods[g] ?? 0) + v
+    }
+    gold += s.gold
+  }
+  return { goods, gold }
 }
 
 /** Cost of upgrading a building to `level` (the target level, 2 or 3). */
 export function upgradeCost(def: BuildingDef, level: number): BuildingCost {
   const f = 1 + (level - 1) * UPGRADE_COST_FACTOR
-  const goods: Partial<Record<GoodId, number>> = {}
+  const goods: Goods = {}
   for (const g of GOOD_IDS) {
     const v = def.cost.goods[g]
     if (v) goods[g] = Math.ceil(v * f)
   }
   return { goods, gold: Math.ceil(def.cost.gold * f) }
+}
+
+/** Total monthly upkeep of all units. */
+export function unitUpkeep(units: readonly Unit[]): { gold: number; food: number } {
+  let gold = 0
+  let food = 0
+  for (const u of units) {
+    gold += UNITS[u.kind].upkeep.gold
+    food += UNITS[u.kind].upkeep.food
+  }
+  return { gold, food }
 }
 
 export interface EconomyTickResult {
@@ -142,7 +214,14 @@ export interface EconomyTickResult {
   population: Record<string, number>
   market: Market
   tradePressure: Stockpile
+  /** Food shortage — population growth is halted this tick. */
   starving: boolean
+  /** Per-source breakdown behind gold, food and science rates. */
+  breakdown: EconomyBreakdown
+}
+
+function add(bucket: Record<string, number>, label: string, v: number): void {
+  if (v) bucket[label] = (bucket[label] ?? 0) + v
 }
 
 export function computeEconomyTick(
@@ -151,40 +230,63 @@ export function computeEconomyTick(
   tradePressure: Stockpile,
   stockpile: Stockpile,
   modifiers: Modifiers,
+  seed = 0,
+  units: readonly Unit[] = [],
 ): EconomyTickResult {
   const owned = ownedRegions(regions)
   const goodsDelta = emptyStockpile()
-  let goldDelta = 0
+  const breakdown = emptyBreakdown()
   let totalPop = 0
 
   for (const r of owned) {
-    const out = regionOutput(r, modifiers)
-    for (const g of GOOD_IDS) goodsDelta[g] += out.goods[g] ?? 0
-    goldDelta += out.gold
+    const sources = regionSources(r, modifiers, regions, seed)
+    const labels: Record<keyof RegionSources, string> = {
+      terrain: 'Terrain',
+      deposit: 'Deposits',
+      rivers: 'Rivers',
+      buildings: 'Buildings',
+    }
+    for (const key of Object.keys(sources) as (keyof RegionSources)[]) {
+      const s = sources[key]
+      for (const g of GOOD_IDS) goodsDelta[g] += s.goods[g] ?? 0
+      add(breakdown.food, labels[key], s.goods.food ?? 0)
+      add(breakdown.gold, labels[key], s.gold)
+    }
     totalPop += r.population
   }
 
   const foodNeed = totalPop * FOOD_PER_POP
-  goodsDelta.food += totalPop * SUBSISTENCE_FOOD_PER_POP - foodNeed
-  goldDelta += totalPop * TAX_PER_POP
+  const subsistence = totalPop * SUBSISTENCE_FOOD_PER_POP
+  const taxes = totalPop * TAX_PER_POP
+  const upkeep = unitUpkeep(units)
+  goodsDelta.food += subsistence - foodNeed - upkeep.food
+  add(breakdown.food, 'Subsistence', subsistence)
+  add(breakdown.food, 'Consumption', -foodNeed)
+  add(breakdown.food, 'Unit upkeep', -upkeep.food)
+  add(breakdown.gold, 'Taxes', taxes)
+  add(breakdown.gold, 'Unit upkeep', -upkeep.gold)
+  const goldDelta = Object.values(breakdown.gold).reduce((a, b) => a + b, 0)
+
   // Food shortage stalls growth — people never die of it.
   const starving = stockpile.food + goodsDelta.food < 0
-  const scienceGain = totalPop * SCIENCE_PER_POP * modifiers.scienceMultiplier
+  const baseScience = totalPop * SCIENCE_PER_POP
+  const scienceGain = baseScience * modifiers.scienceMultiplier
+  add(breakdown.science, 'Population', baseScience)
+  add(breakdown.science, 'Research bonuses', scienceGain - baseScience)
 
   const population: Record<string, number> = {}
   for (const r of owned) {
     if (starving) {
       population[r.id] = r.population
     } else {
-      const localBonus = r.buildings.reduce(
-        (sum, b) => sum + BUILDINGS[b.id].popGrowthBonus,
-        0,
-      )
+      const localBonus =
+        r.buildings.reduce((sum, b) => sum + BUILDINGS[b.id].popGrowthBonus, 0) +
+        riverCount(seed, r, regions) * RIVER_POP_GROWTH
       const rate =
         BASE_POP_GROWTH * modifiers.popGrowthMultiplier * (1 + localBonus)
       // Housing caps growth — crowded regions stop expanding.
       population[r.id] = Math.min(
-        regionCapacity(r),
+        Math.max(regionCapacity(r), r.population),
         r.population * (1 + rate),
       )
     }
@@ -222,6 +324,7 @@ export function computeEconomyTick(
     market: newMarket,
     tradePressure: newPressure,
     starving,
+    breakdown,
   }
 }
 
@@ -232,7 +335,7 @@ export function claimCost(modifiers: Modifiers): number {
 export function canAffordCost(
   stockpile: Stockpile,
   gold: number,
-  cost: { goods: Partial<Record<GoodId, number>>; gold: number },
+  cost: { goods: Goods; gold: number },
 ): boolean {
   if (gold < cost.gold) return false
   return GOOD_IDS.every((g) => (stockpile[g] ?? 0) >= (cost.goods[g] ?? 0))

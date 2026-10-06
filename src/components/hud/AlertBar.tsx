@@ -1,5 +1,6 @@
 import type { LucideIcon } from 'lucide-react'
 import {
+  Coins,
   Compass,
   Flag,
   FlaskConical,
@@ -39,6 +40,8 @@ export default function AlertBar() {
   const units = useGameStore((s) => s.units)
   const stockpile = usePlayerStore((s) => s.stockpile)
   const goodsRate = usePlayerStore((s) => s.goodsRate)
+  const gold = usePlayerStore((s) => s.gold)
+  const goldRate = usePlayerStore((s) => s.goldRate)
   const activeId = useResearchStore((s) => s.activeId)
   const selectRegion = useGameStore((s) => s.selectRegion)
   const selectUnit = useGameStore((s) => s.selectUnit)
@@ -61,7 +64,7 @@ export default function AlertBar() {
     alerts.push({
       id: 'starving',
       icon: Wheat,
-      label: 'Food critically low — your people are starving!',
+      label: 'Food shortage — population growth has halted',
       severity: 'critical',
     })
   } else if (stockpile.food < 15 || goodsRate.food < 0) {
@@ -70,6 +73,19 @@ export default function AlertBar() {
       icon: Wheat,
       label: 'Food is running low — build farms or buy food',
       severity: 'warning',
+    })
+  }
+
+  if (goldRate < 0 && gold < Math.max(5, -goldRate * 3)) {
+    alerts.push({
+      id: 'treasury',
+      icon: Coins,
+      label:
+        gold < 1
+          ? 'Treasury empty — unit upkeep unpaid, troops will not heal'
+          : 'Treasury running dry — upkeep exceeds income',
+      severity: gold < 1 ? 'critical' : 'warning',
+      onClick: () => toggleWindow('market'),
     })
   }
 

@@ -16,6 +16,7 @@ export function baseModifiers(): Modifiers {
     armyMultiplier: 1,
     extraBuildingSlots: 0,
     garrisonBonus: 0,
+    unitMoveBonus: 0,
     unlockedBuildings: [],
     unlockedUnits: [],
   }
@@ -69,6 +70,9 @@ export function computeModifiers(completed: readonly string[]): Modifiers {
           break
         case 'buildingSlots':
           mods.extraBuildingSlots += e.amount
+          break
+        case 'unitMoveBonus':
+          mods.unitMoveBonus += e.amount
           break
       }
     }
@@ -129,6 +133,25 @@ export function computeResearchTick(
   }
 }
 
+/** Drop queued techs whose prerequisites are no longer completed, active, or
+ * queued ahead of them (e.g. after a prerequisite was removed from the queue). */
+export function pruneQueue(
+  queue: readonly string[],
+  completed: readonly string[],
+  activeId: string | null,
+): string[] {
+  const kept: string[] = []
+  for (const id of queue) {
+    const tech = TECHS[id]
+    if (!tech) continue
+    const ok = tech.prerequisites.every(
+      (p) => completed.includes(p) || p === activeId || kept.includes(p),
+    )
+    if (ok) kept.push(id)
+  }
+  return kept
+}
+
 export function eraIndex(era: Era): number {
   return ERA_ORDER.indexOf(era)
 }
@@ -145,17 +168,22 @@ export function advanceEra(current: Era, completed: readonly string[]): Era {
   return current
 }
 
-/** Returns null when research can start, else a human-readable reason. */
+/** Returns null when research can start (or be queued), else a readable
+ * reason. `planned` = the active tech plus queued techs ahead of this one;
+ * their completion counts toward prerequisites so whole chains can be queued. */
 export function researchBlockReason(
   tech: TechNode,
   completed: readonly string[],
   era: Era,
+  planned: readonly string[] = [],
 ): string | null {
   if (completed.includes(tech.id)) return 'Already researched'
   if (eraIndex(era) < eraIndex(tech.era)) {
     return `Requires ${tech.era} era`
   }
-  const missing = tech.prerequisites.filter((p) => !completed.includes(p))
+  const missing = tech.prerequisites.filter(
+    (p) => !completed.includes(p) && !planned.includes(p),
+  )
   if (missing.length) {
     return `Requires ${missing.map((p) => TECHS[p]?.name ?? p).join(', ')}`
   }

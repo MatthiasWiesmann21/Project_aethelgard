@@ -206,12 +206,15 @@ export const TECHS: Record<string, TechNode> = {
   roads: {
     id: 'roads',
     name: 'Roads',
-    description: 'Settlers travel faster. -15% region claim cost.',
+    description: 'Paved ways speed everything. -15% region claim cost, +1 unit move.',
     tree: 'infrastructure',
     era: 'ancient',
     cost: 45,
     prerequisites: ['masonry'],
-    effects: [{ kind: 'claimCostMultiplier', multiplier: 0.85 }],
+    effects: [
+      { kind: 'claimCostMultiplier', multiplier: 0.85 },
+      { kind: 'unitMoveBonus', amount: 1 },
+    ],
   },
   engineering: {
     id: 'engineering',
@@ -301,12 +304,15 @@ export const TECHS: Record<string, TechNode> = {
   military_logistics: {
     id: 'military_logistics',
     name: 'Military Logistics',
-    description: 'Supply trains open the frontier. -20% claim cost.',
+    description: 'Supply trains open the frontier. -20% claim cost, +1 unit move.',
     tree: 'military',
     era: 'renaissance',
     cost: 180,
     prerequisites: ['standing_army'],
-    effects: [{ kind: 'claimCostMultiplier', multiplier: 0.8 }],
+    effects: [
+      { kind: 'claimCostMultiplier', multiplier: 0.8 },
+      { kind: 'unitMoveBonus', amount: 1 },
+    ],
   },
   conscription: {
     id: 'conscription',

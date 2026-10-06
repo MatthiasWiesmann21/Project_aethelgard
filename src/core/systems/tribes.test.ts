@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyRaidLoot,
+  TRIBE_EXPAND_MIN_GARRISON,
+  TRIBE_GARRISON_CAP,
   TRIBE_INTERVAL,
+  TRIBE_REGROWTH,
   tribeTick,
 } from './tribes'
 import { emptyStockpile } from './economy'
@@ -24,7 +27,6 @@ function makeRegion(overrides: Partial<Region> = {}): Region {
     construction: null,
     deposit: null,
     garrison: 0,
-    army: 0,
     ...overrides,
   }
 }
@@ -97,6 +99,65 @@ describe('tribeTick', () => {
       }
     }
     throw new Error('no repelled raid observed in 40 rounds')
+  })
+})
+
+describe('tribeTick defense & expansion rules', () => {
+  /** r0 hostile; its only neighbor is player-owned r2 → raids are the only option. */
+  function raidWorld(garrison: number) {
+    return {
+      r0: makeRegion({ id: 'r0', hostile: true, garrison, neighborIds: ['r2'] }),
+      r2: makeRegion({ id: 'r2', ownerId: 'player', population: 5, neighborIds: ['r0'] }),
+    }
+  }
+
+  function firstRaid(
+    world: Record<string, Region>,
+    ctx: Parameters<typeof tribeTick>[3],
+  ) {
+    for (let t = TRIBE_INTERVAL; t <= TRIBE_INTERVAL * 60; t += TRIBE_INTERVAL) {
+      const res = tribeTick(world, 13, t, ctx)
+      if (res && res.messages.length) return res
+    }
+    throw new Error('no raid in 60 rounds')
+  }
+
+  it('tech garrison bonus repels raids that would otherwise plunder', () => {
+    // garrison 20 regrows to 21 → needs defense ≥ 12.6
+    const undefended = firstRaid(raidWorld(20), { garrisonBonus: 0, unitStrength: {} })
+    expect(undefended.messages[0]).toMatch(/plundered/)
+    const fortified = firstRaid(raidWorld(20), { garrisonBonus: 15, unitStrength: {} })
+    expect(fortified.messages[0]).toMatch(/repelled/)
+  })
+
+  it('stationed units help defend', () => {
+    const res = firstRaid(raidWorld(20), { garrisonBonus: 0, unitStrength: { r2: 20 } })
+    expect(res.messages[0]).toMatch(/repelled/)
+  })
+
+  it('never expands into a region occupied by player units', () => {
+    for (let t = TRIBE_INTERVAL; t <= TRIBE_INTERVAL * 30; t += TRIBE_INTERVAL) {
+      const res = tribeTick(makeWorld(), 11, t, { garrisonBonus: 0, unitStrength: { r1: 6 } })
+      expect(res?.regions.r1.hostile).toBe(false)
+    }
+  })
+
+  it('weak tribes do not expand (no garrison-1 husks)', () => {
+    const world = makeWorld()
+    world.r0 = { ...world.r0, garrison: TRIBE_EXPAND_MIN_GARRISON - 2 }
+    for (let t = TRIBE_INTERVAL; t <= TRIBE_INTERVAL * 30; t += TRIBE_INTERVAL) {
+      expect(tribeTick(world, 11, t)?.regions.r1.hostile).toBe(false)
+    }
+  })
+
+  it('garrisons regrow each round up to the cap', () => {
+    const lonely = {
+      r0: makeRegion({ id: 'r0', hostile: true, garrison: 5, neighborIds: [] }),
+      r9: makeRegion({ id: 'r9', hostile: true, garrison: TRIBE_GARRISON_CAP, neighborIds: [] }),
+    }
+    const res = tribeTick(lonely, 1, TRIBE_INTERVAL)!
+    expect(res.regions.r0.garrison).toBe(5 + TRIBE_REGROWTH)
+    expect(res.regions.r9.garrison).toBe(TRIBE_GARRISON_CAP)
   })
 })
 

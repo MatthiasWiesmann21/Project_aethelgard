@@ -4,6 +4,7 @@ import {
   baseModifiers,
   computeModifiers,
   computeResearchTick,
+  pruneQueue,
   researchBlockReason,
 } from './research'
 import { TECHS } from '../../data/techs'
@@ -88,6 +89,30 @@ describe('researchBlockReason', () => {
     expect(
       researchBlockReason(TECHS.writing, ['oral_tradition'], 'ancient'),
     ).toBeNull()
+  })
+
+  it('counts active/queued techs as planned prerequisites', () => {
+    expect(
+      researchBlockReason(TECHS.craftsmanship, [], 'ancient', [
+        'oral_tradition',
+        'writing',
+      ]),
+    ).toBeNull()
+  })
+})
+
+describe('pruneQueue', () => {
+  it('drops queued techs whose prerequisite left the plan', () => {
+    // writing needs oral_tradition, craftsmanship needs writing
+    expect(pruneQueue(['writing', 'craftsmanship', 'barter'], [], null)).toEqual([
+      'barter',
+    ])
+  })
+
+  it('keeps chains rooted in the active tech', () => {
+    expect(
+      pruneQueue(['writing', 'craftsmanship'], [], 'oral_tradition'),
+    ).toEqual(['writing', 'craftsmanship'])
   })
 })
 

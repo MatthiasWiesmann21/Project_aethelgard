@@ -1,7 +1,8 @@
 import { Delaunay } from 'd3-delaunay'
-import type { Region, TerrainType, Vec2 } from '../../types/game'
-import { isLand } from '../../data/terrain'
+import type { Region, TerrainType, Unit, Vec2 } from '../../types/game'
+import { isLand, TERRAIN } from '../../data/terrain'
 import { DEPOSITS, DEPOSIT_IDS } from '../../data/deposits'
+import { RIVER_CHANCE, RIVER_EXTRA_MOVE_COST } from '../../data/rivers'
 
 export const MAP_WIDTH = 1200
 export const MAP_HEIGHT = 800
@@ -75,7 +76,6 @@ export function generateWorld(seed: number): Record<string, Region> {
       construction: null,
       deposit: null,
       garrison: 0,
-      army: 0,
     }
   })
 
@@ -84,7 +84,8 @@ export function generateWorld(seed: number): Record<string, Region> {
   assignDeposits(regions, rand)
   placeHostiles(regions, rand)
   assignNames(regions, rand)
-  return Object.fromEntries(regions.map((r) => [r.id, r]))
+  // The capital and its neighbors start explored.
+  return revealAround(Object.fromEntries(regions.map((r) => [r.id, r])))
 }
 
 /** Ellipse landmass: outside = water, land touching water = coast, plus
@@ -190,9 +191,6 @@ function placeCapital(regions: Region[]): void {
     best.terrain = 'plains'
   }
   best.buildings = [{ id: 'farm', level: 1 }]
-
-  // A friendly neighbor starts explored, everything adjacent is revealed.
-  revealAround(regions)
 }
 
 /** ~30% of land regions get a resource deposit matching their terrain. */
@@ -256,27 +254,18 @@ function assignNames(regions: Region[], rand: () => number): void {
   if (capital) capital.name = 'Aethelgard'
 }
 
-/** Owned regions plus their neighbors become explored. */
-export function revealAround(regions: Region[]): void {
-  for (const r of regions) {
-    if (r.ownerId === 'player') revealRadius(regions, r.id, 1)
-  }
-}
-
-/** Reveal every region within `radius` graph hops of `startId`
- * (BFS over adjacency — used for unit sight). Fog never re-closes. */
-export function revealRadius(
-  regions: Region[],
+/** Region ids within `radius` graph hops of `startId` (BFS over adjacency). */
+function idsWithin(
+  regions: Record<string, Region>,
   startId: string,
   radius: number,
-): void {
-  const byId = new Map(regions.map((r) => [r.id, r]))
+): Set<string> {
   const seen = new Set([startId])
   let frontier = [startId]
   for (let d = 0; d < radius; d++) {
     const next: string[] = []
     for (const id of frontier) {
-      for (const n of byId.get(id)?.neighborIds ?? []) {
+      for (const n of regions[id]?.neighborIds ?? []) {
         if (!seen.has(n)) {
           seen.add(n)
           next.push(n)
@@ -285,34 +274,177 @@ export function revealRadius(
     }
     frontier = next
   }
-  for (const id of seen) {
-    const r = byId.get(id)
-    if (r) r.explored = true
-  }
+  return seen
 }
 
-/** BFS shortest path through traversable land (non-hostile). Returns region
- * ids to walk *after* `fromId`, or null when unreachable. Unexplored regions
- * are walkable — that's what scouts are for. */
+/** Copy-on-write: returns `regions` itself when nothing changes, otherwise a
+ * new record where only newly explored regions are cloned. Never mutates. */
+function markExplored(
+  regions: Record<string, Region>,
+  ids: Iterable<string>,
+): Record<string, Region> {
+  let next = regions
+  for (const id of ids) {
+    const r = regions[id]
+    if (!r || r.explored) continue
+    if (next === regions) next = { ...regions }
+    next[id] = { ...r, explored: true }
+  }
+  return next
+}
+
+/** Owned regions plus their neighbors become explored. */
+export function revealAround(
+  regions: Record<string, Region>,
+): Record<string, Region> {
+  const ids = new Set<string>()
+  for (const r of Object.values(regions)) {
+    if (r.ownerId !== 'player') continue
+    for (const id of idsWithin(regions, r.id, 1)) ids.add(id)
+  }
+  return markExplored(regions, ids)
+}
+
+/** Reveal every region within `radius` hops of `startId` (unit sight).
+ * Fog never re-closes. Copy-on-write — the input is never mutated. */
+export function revealRadius(
+  regions: Record<string, Region>,
+  startId: string,
+  radius: number,
+): Record<string, Region> {
+  return markExplored(regions, idsWithin(regions, startId, radius))
+}
+
+/** Rivers are deterministic edges between land neighbors — computed from the
+ * world seed, so they never need to be stored or migrated in saves. */
+export function isRiver(
+  seed: number,
+  regions: Record<string, Region>,
+  aId: string,
+  bId: string,
+): boolean {
+  const a = regions[aId]
+  const b = regions[bId]
+  if (!a || !b || !isLand(a.terrain) || !isLand(b.terrain)) return false
+  const [lo, hi] = aId < bId ? [aId, bId] : [bId, aId]
+  const hash =
+    (Number(lo.slice(1)) * 73856093) ^ (Number(hi.slice(1)) * 19349663)
+  return mulberry32(seed ^ hash)() < RIVER_CHANCE
+}
+
+/** How many of the region's borders are rivers (drives food/gold/growth). */
+export function riverCount(
+  seed: number,
+  region: Region,
+  regions: Record<string, Region>,
+): number {
+  return region.neighborIds.filter((n) => isRiver(seed, regions, region.id, n))
+    .length
+}
+
+export interface RiverEdge {
+  a: string
+  b: string
+  /** Endpoints of the shared Voronoi border the river runs along. */
+  from: Vec2
+  to: Vec2
+}
+
+/** The border segment shared by two neighboring Voronoi cells. */
+export function sharedBorder(a: Region, b: Region): [Vec2, Vec2] | null {
+  const EPS = 0.01
+  const shared: Vec2[] = []
+  for (const p of a.polygon) {
+    const onB = b.polygon.some(
+      (q) => Math.abs(p.x - q.x) < EPS && Math.abs(p.y - q.y) < EPS,
+    )
+    const dup = shared.some(
+      (q) => Math.abs(p.x - q.x) < EPS && Math.abs(p.y - q.y) < EPS,
+    )
+    if (onB && !dup) shared.push(p)
+  }
+  return shared.length >= 2 ? [shared[0], shared[1]] : null
+}
+
+/** Rivers never change after generation; cache per world. Keyed on the first
+ * region's polygon array, which keeps its identity through state copies and
+ * is replaced only when a new world (or a loaded save) is built. */
+const riverCache = new WeakMap<Vec2[], { seed: number; edges: RiverEdge[] }>()
+
+/** Deduped river edges with their border geometry (cached per world). */
+export function riverEdges(
+  seed: number,
+  regions: Record<string, Region>,
+): RiverEdge[] {
+  const first = Object.values(regions)[0]
+  const cached = first && riverCache.get(first.polygon)
+  if (cached && cached.seed === seed) return cached.edges
+  const edges: RiverEdge[] = []
+  for (const r of Object.values(regions)) {
+    for (const n of r.neighborIds) {
+      if (r.id >= n || !isRiver(seed, regions, r.id, n)) continue
+      const border = sharedBorder(r, regions[n])
+      if (border) edges.push({ a: r.id, b: n, from: border[0], to: border[1] })
+    }
+  }
+  if (first) riverCache.set(first.polygon, { seed, edges })
+  return edges
+}
+
+/** Move points to step from `fromId` into the neighbor `toId`: terrain cost
+ * plus a river-crossing surcharge. */
+export function stepCost(
+  seed: number,
+  regions: Record<string, Region>,
+  fromId: string,
+  toId: string,
+): number {
+  const to = regions[toId]
+  if (!to) return Infinity
+  return (
+    TERRAIN[to.terrain].moveCost +
+    (isRiver(seed, regions, fromId, toId) ? RIVER_EXTRA_MOVE_COST : 0)
+  )
+}
+
+function walkable(r: Region | undefined): r is Region {
+  return !!r && isLand(r.terrain) && !r.hostile
+}
+
+/** Dijkstra cheapest path through traversable land (non-hostile), weighted by
+ * `stepCost`. Returns region ids to walk *after* `fromId`, or null when
+ * unreachable. Unexplored regions are walkable — that's what scouts are for. */
 export function findPath(
   regions: Record<string, Region>,
   fromId: string,
   toId: string,
+  seed = 0,
 ): string[] | null {
   if (fromId === toId) return []
-  const target = regions[toId]
-  if (!target || !isLand(target.terrain) || target.hostile) return null
-  const prev = new Map<string, string>([[fromId, '']])
-  const queue = [fromId]
-  while (queue.length) {
-    const cur = queue.shift()!
+  if (!walkable(regions[toId])) return null
+  const dist = new Map<string, number>([[fromId, 0]])
+  const prev = new Map<string, string>()
+  const open = new Set([fromId])
+  while (open.size) {
+    let cur = ''
+    let best = Infinity
+    for (const id of open) {
+      const d = dist.get(id)!
+      if (d < best) {
+        best = d
+        cur = id
+      }
+    }
+    open.delete(cur)
     if (cur === toId) break
     for (const n of regions[cur]?.neighborIds ?? []) {
-      if (prev.has(n)) continue
-      const nr = regions[n]
-      if (!nr || !isLand(nr.terrain) || nr.hostile) continue
-      prev.set(n, cur)
-      queue.push(n)
+      if (!walkable(regions[n])) continue
+      const d = best + stepCost(seed, regions, cur, n)
+      if (d < (dist.get(n) ?? Infinity)) {
+        dist.set(n, d)
+        prev.set(n, cur)
+        open.add(n)
+      }
     }
   }
   if (!prev.has(toId)) return null
@@ -324,26 +456,33 @@ export function findPath(
 }
 
 /**
- * Walks a unit along its path, spending up to `movesLeft` steps and revealing
- * fog at each one. Mutates `regions` in place (the caller owns the copies).
- * Stops early when a waypoint is no longer traversable.
+ * Walks a unit along its path, paying `stepCost` per step and revealing fog.
+ * Civ rule: a unit with its full allowance (`maxMoves`) may always take one
+ * step, so slow units are never stuck in front of mountains or rivers.
+ * Mutates `unit` (callers pass a fresh copy); returns the updated region
+ * record (copy-on-write). Stops early when a waypoint is no longer walkable.
  */
 export function advanceUnit(
-  unit: { regionId: string; movesLeft: number; sight: number; path: string[] },
-  regions: Region[],
-): void {
-  const byId = new Map(regions.map((r) => [r.id, r]))
+  unit: Unit,
+  regions: Record<string, Region>,
+  seed: number,
+  maxMoves: number,
+): Record<string, Region> {
+  let next = regions
   while (unit.movesLeft > 0 && unit.path.length > 0) {
-    const next = byId.get(unit.path[0])
-    if (!next || !isLand(next.terrain) || next.hostile) {
+    const target = next[unit.path[0]]
+    if (!walkable(target)) {
       unit.path = []
-      return
+      break
     }
-    unit.path.shift()
-    unit.regionId = next.id
-    unit.movesLeft -= 1
-    revealRadius(regions, next.id, unit.sight)
+    const cost = stepCost(seed, next, unit.regionId, target.id)
+    if (unit.movesLeft < cost && unit.movesLeft < maxMoves) break
+    unit.path = unit.path.slice(1)
+    unit.regionId = target.id
+    unit.movesLeft = Math.max(0, unit.movesLeft - cost)
+    next = revealRadius(next, target.id, unit.sight)
   }
+  return next
 }
 
 /** A region is claimable when explored, land, unowned, non-hostile, and next

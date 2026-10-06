@@ -14,6 +14,7 @@ export type TechEffect =
   | { kind: 'popGrowthMultiplier'; multiplier: number }
   | { kind: 'scienceMultiplier'; multiplier: number }
   | { kind: 'buildingSlots'; amount: number }
+  | { kind: 'unitMoveBonus'; amount: number }
 
 export interface TechNode {
   id: string

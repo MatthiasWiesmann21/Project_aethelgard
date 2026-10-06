@@ -9,21 +9,10 @@ import {
 } from 'lucide-react'
 import { useGameStore } from '../../store/useGameStore'
 import { ERA_LABEL } from '../../data/techs'
+import { formatDate } from '../../core/time'
 import type { GameSpeed } from '../../types/game'
 
 const SPEEDS: GameSpeed[] = [1, 2, 4]
-const START_YEAR_BC = 10000
-const MONTHS = [
-  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-]
-
-/** One tick = one month; the era count starts at 10,000 BC. */
-function formatDate(tick: number): string {
-  const year = START_YEAR_BC - Math.floor(tick / 12)
-  const month = MONTHS[tick % 12]
-  return `${month} ${year.toLocaleString()} BC`
-}
 
 export default function TickControls() {
   const tick = useGameStore((s) => s.tick)

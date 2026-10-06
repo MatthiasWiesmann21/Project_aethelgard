@@ -55,8 +55,6 @@ export interface Region {
   deposit: DepositId | null
   /** Defensive strength (hostile defenders or player's garrison). */
   garrison: number
-  /** Player's assembled attack force stationed in this region. */
-  army: number
 }
 
 export interface MarketGood {
@@ -85,23 +83,32 @@ export interface Modifiers {
   armyMultiplier: number
   extraBuildingSlots: number
   garrisonBonus: number
+  /** Extra move allowance for all units (roads, logistics techs). */
+  unitMoveBonus: number
   unlockedBuildings: BuildingId[]
   unlockedUnits: UnitKind[]
 }
 
-export type UnitKind = 'warrior' | 'traveler'
+export type UnitKind = 'warrior' | 'traveler' | 'soldier'
 
-/** A mobile unit that scouts the map (revealing fog) and can fight. */
+/** A mobile unit that scouts the map (revealing fog) and can fight. Max move
+ * points are derived each tick via `unitMoves()` (type + era + techs). */
 export interface Unit {
   id: string
   kind: UnitKind
   regionId: string
   strength: number
-  /** Regions-per-tick movement allowance; refills every tick. */
-  moves: number
+  /** Move points left this tick; refilled to `unitMoves()` every tick. */
   movesLeft: number
   /** Sight radius in graph hops around the unit's region. */
   sight: number
   /** Remaining waypoints of a multi-tick move order (excluding current region). */
   path: string[]
+}
+
+/** Per-source contributions (label → amount per tick) behind each HUD rate. */
+export interface EconomyBreakdown {
+  gold: Record<string, number>
+  food: Record<string, number>
+  science: Record<string, number>
 }
